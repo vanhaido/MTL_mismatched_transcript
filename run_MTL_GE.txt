@@ -1,0 +1,172 @@
+#!/bin/bash
+
+# This script is used to implement multitask learning (MTL) using mismatched transcription.
+# You are recommended to run block by block
+# Read our paper for more details
+
+# Van Hai Do, Nancy Chen F., Boon Pang Lim, Mark Hasegawa-Johnson, "Multitask Learning for Phone Recognition of Underresourced Languages Using Mismatched Transcription," IEEE/ACM Transactions on Audio, Speech, and Language Processing. 2018 Mar;26(3):501-514.
+
+# email: haidovan@gmail.com
+#--------------------------------------------------------------------------
+
+
+
+#===============  monolingual GMM model=====================================
+
+#-- you need to prepare data/{lang,lang_test,train,eval} dir before running this script---
+#  check conf/{fbank.conf,pitch.conf} for correct sampling rate
+
+stage=0
+# stage=0 => generate feature
+# stage=1 => training
+# stage=2 => decoding
+
+traindir=./_DATA/GE/train12min 
+evaldir=./_DATA/GE/eval20min
+expdir=exp/GE/exp_train12min
+langdir=data/GE/lang
+langtestdir=data/GE/lang_test
+NUMLEAVES=200 
+NUMGAUSSIANS=1000
+nj_train=4
+nj_decode=4
+./train_GMM.sh $traindir $evaldir $expdir $langdir $langtestdir $NUMLEAVES $NUMGAUSSIANS $stage $nj_train $nj_decode
+
+
+
+#=============== mismatched GMM model=====================================
+stage=0
+# stage=0 => generate feature
+# stage=1 => training
+
+
+
+traindir=_DATA/GE/adapt10hr_CMN
+expdir=exp/GE/exp_mismatched_CMN
+langdir=data/GE/lang_mismatched_CMN
+NUMLEAVES=2000 
+NUMGAUSSIANS=20000
+nj_train=6
+./train_mismatchedGMM.sh $traindir $expdir $langdir $NUMLEAVES $NUMGAUSSIANS $stage $nj_train
+
+
+#=====================================================================================================================
+#------------------------mismatched bottleneck feature DNN------------------------------------------------------------
+
+traindir=_DATA/GE/adapt10hr_CMN   # input
+		alignmentdir=exp/GE/exp_mismatched_CMN/tri3b_ali
+		dnndir=exp/GE/exp_mismatched_CMN/BN-DNN # output
+BNF/run_train_bn_dnn.sh $traindir $alignmentdir $dnndir
+
+traindir=./_DATA/GE/train12min 
+evaldir=./_DATA/GE/eval20min
+BNFtrain=$dnndir/BNF/train
+BNFeval=$dnndir/BNF/eval
+nj=4
+BNF/run_generate_bn_dnn.sh $dnndir $traindir $BNFtrain $nj
+BNF/run_generate_bn_dnn.sh $dnndir $evaldir $BNFeval $nj
+
+
+
+#=====================================================================================================================
+#===============  mismatched BNF for GMM model=====================================
+stage=1
+
+# stage=1 => training
+# stage=2 => decoding
+expdir=exp/GE/mismatchedBNF/exp_train12min
+langdir=data/GE/lang
+langtestdir=data/GE/lang_test
+NUMLEAVES=200 
+NUMGAUSSIANS=1000
+nj_train=4
+nj_decode=4
+./train_GMM.sh $BNFtrain $BNFeval $expdir $langdir $langtestdir $NUMLEAVES $NUMGAUSSIANS $stage $nj_train $nj_decode
+
+
+
+
+#=====================================================================================================================
+#--------------------------------------MULTITASK LEARNING----------------------------------------------------
+
+stage=3 
+# stage=0 => combine datadir from multi-tasks and extract filterbank+f0 feature
+# stage=1 => Prepare the merged targets
+# stage=2 => Train the MTL system
+# stage=3 => Decoding stage 
+
+nj=4
+
+# data dir for training (one for target language with matched transcripts, one for adapt data with mismatched transcripts
+	data_dir_csl="./_DATA/GE/train12min:_DATA/GE/adapt10hr_CMN"
+	lang_code_csl="train12min:adapt10hr_CMN" 
+	evaldir=./_DATA/GE/eval20min
+	
+# provide alignment from GMM, one from matched GMM with limited training data e.g., 12 minutes
+# one from mismatched GMM i.e., audio of the target language, (mismatched) transcripts from foreign language
+	ali_dir_csl="exp/GE/exp_train12min/tri3b_ali:exp/GE/exp_mismatched_CMN/tri3b_ali"
+
+# combination weights
+	lang_weight_csl="1.0:0.7"
+
+# graphdir, HMM model of the matched GMM => use for decoding
+	graph_dir=exp/GE/exp_train12min/tri3b/graph
+	mdlfile=exp/GE/exp_train12min/tri3b/final.mdl
+
+# option for the MTL DNN # dnn_small for 4 hidden layers, 1024 sigmoid neurons
+	nnet_type=dnn_small
+
+#---------output---------
+	expdir=exp/GE/multitask/train12min # experiment output dir
+	datadir=data/GE/multitask/train12min # combined data dir
+
+
+./MTL/multitask.sh $stage $data_dir_csl $lang_code_csl $evaldir $ali_dir_csl $lang_weight_csl $graph_dir $mdlfile $nnet_type $expdir $datadir $nj
+
+
+
+#=====================================================================================================================
+#========================run MLT with alignment generated from GMM trained with mismatched bottleneck ===================
+#===== only different in alignment of matched softmax layer =========
+
+stage=1 
+# stage=0 => combine datadir from multi-tasks and extract filterbank+f0 feature
+# stage=1 => Prepare the merged targets
+# stage=2 => Train the MTL system
+# stage=3 => Decoding stage 
+
+nj=4
+
+# data dir for training (one for target language with matched transcripts, one for adapt data with mismatched transcripts
+	data_dir_csl="./_DATA/GE/train12min:_DATA/GE/adapt10hr_CMN"
+	lang_code_csl="train12min:adapt10hr_CMN" 
+	evaldir=./_DATA/GE/eval20min
+	
+# provide alignment from GMM, one from matched GMM with limited training data e.g., 12 minutes
+# one from mismatched GMM i.e., audio of the target language, (mismatched) transcripts from foreign language
+	ali_dir_csl="exp/GE/mismatchedBNF/exp_train12min/tri3b_ali:exp/GE/exp_mismatched_CMN/tri3b_ali"
+
+# combination weights
+	lang_weight_csl="1.0:0.7"
+
+# graphdir, HMM model of the matched GMM => use for decoding
+	graph_dir=exp/GE/mismatchedBNF/exp_train12min/tri3b/graph
+	mdlfile=exp/GE/mismatchedBNF/exp_train12min/tri3b/final.mdl
+
+# option for the MTL DNN # dnn_small for 4 hidden layers, 1024 sigmoid neurons
+	nnet_type=dnn_small
+
+#---------output---------
+	expdir=exp/GE/multitask_BNF_ali/train12min # experiment output dir
+	datadir=data/GE/multitask/train12min # combined data dir
+
+
+./MTL/multitask.sh $stage $data_dir_csl $lang_code_csl $evaldir $ali_dir_csl $lang_weight_csl $graph_dir $mdlfile $nnet_type $expdir $datadir $nj
+
+
+
+
+
+
+
+
